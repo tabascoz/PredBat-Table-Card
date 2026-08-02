@@ -50,6 +50,12 @@ class PredbatTableCard extends HTMLElement {
     
     this.config = config;
 
+    console.info(
+      `%cPREDBAT-TABLE-CARD %cv1.0.0`,
+      "color: white; background: #3AEE85; padding: 2px 6px; border-radius: 3px; font-weight: bold;",
+      "color: #aaa;"
+    );
+
   }    
   
   // Let HA know which editor element to use
