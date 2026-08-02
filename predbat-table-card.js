@@ -515,8 +515,11 @@ class PredbatTableCard extends HTMLElement {
         const forceEntityObjects = this.getOverrideEntities();
         for (const forceEntity of forceEntityObjects) {
             // forceEntity.entityName
-            const oldForce = oldHass.states[forceEntity.entityName].state;
-            const newForce = hass.states[forceEntity.entityName].state;
+            const oldEntity = oldHass.states[forceEntity.entityName];
+            const newEntity = hass.states[forceEntity.entityName];
+            if (!oldEntity || !newEntity) continue;
+            const oldForce = oldEntity.state;
+            const newForce = newEntity.state;
             manualForceChanged = oldForce !== newForce;
             if (manualForceChanged){
                 //console.log("MANUAL FORCE CHANGED " + oldForce + " - " + newForce);
@@ -599,9 +602,22 @@ class PredbatTableCard extends HTMLElement {
     let columnsToReturn = this.config.columns;
     let rawHTML = hass.states[entityId].attributes.html;
     
-    const dataArray = this.getArrayDataFromHTML(rawHTML, hass.themes.darkMode); 
+    // Try raw data first (more stable in newer Predbat v8.47+), fall back to HTML parsing
+    let dataArray;
+    const rawData = hass.states[entityId].attributes.raw;
+    if (rawData && rawData.rows && rawData.rows.length > 0) {
+        dataArray = this.getArrayDataFromRaw(rawData, hass.themes.darkMode);
+    } else if (rawHTML) {
+        dataArray = this.getArrayDataFromHTML(rawHTML, hass.themes.darkMode);
+    } else {
+        this.renderError("Predbat plan data is not available. Please check that Predbat is running.");
+        return;
+    }
     
-    //const dataArray = this.getArrayDataFromRaw(hass.states[entityId].attributes.raw, hass.themes.darkMode);
+    if(!dataArray || dataArray.length === 0) {
+        this.content.innerHTML = "";
+        return;
+    }
     
     //filter out any columns not in the data
     columnsToReturn = columnsToReturn.filter(column => {
@@ -1015,7 +1031,7 @@ getTimeframeForOverride(timeString) {
 }
 
   getArrayForEntityForceStates(entity){
-      
+      if (!entity || entity.state === undefined || entity.state === null) return [];
       let entityState = entity.state;
       return entityState.replace(/^\+/, '').split(',');
   }
@@ -1540,7 +1556,9 @@ getTimeframeForOverride(timeString) {
   checkRowIsAllowedForOverride(forceEntityObjects, timeForSelectOverride, itemIndex) {
     let isAllowed = false;
     for (const forceEntity of forceEntityObjects) {
-        const allowedOptions = this._hass.states[forceEntity.entityName].attributes.options;
+        const entityState = this._hass.states[forceEntity.entityName];
+        if (!entityState || !entityState.attributes || !entityState.attributes.options) continue;
+        const allowedOptions = entityState.attributes.options;
         if(itemIndex <= allowedOptions.length-2)
             isAllowed = allowedOptions.includes(timeForSelectOverride);
         if(isAllowed)
@@ -2856,93 +2874,106 @@ convertTimeStampToFriendly(timestamp){
  
     let rowsToReturn = [];
     
+    // Use the new color fields from Predbat v8.47+ if available, otherwise fall back to computing them
     for (const row of raw.rows) {
         let rowDictionary = {};
         let color = "#FFFFFF";
         
-        // change the color, logic from 
-        // https://github.com/springfall2008/batpred/blob/dc18d2d9ffaae8b7b2fa4addf7f40bdec1da4890/apps/predbat/output.py#L1141
+        // Use Predbat-supplied colors when available (v8.47+), otherwise compute them
+        let pvColor = row.pv_color || color;
+        if (!row.pv_color) {
+            if(row.pv_forecast >= 0.2) pvColor = "#FFAAAA";
+            else if(row.pv_forecast >= 0.1) pvColor = "#FFFF00";
+        }
+            
+        let socColor = row.soc_color || "#3AEE85";
+        if (!row.soc_color) {
+            if(row.soc_percent < 20.0) socColor = "#F18261";
+            else if (row.soc_percent < 50.0) socColor = "#FFFF00";
+        }
+            
+        let loadColor = row.load_color || color;
+        if (!row.load_color) {
+            if(row.load_forecast >= 0.5) loadColor = "#F18261";
+            else if (row.load_forecast >= 0.25) loadColor = "#FFFF00";
+            else if (row.load_forecast > 0.0) loadColor = "#AAFFAA";
+        }
         
-        let pvColor = color;
-        if(row.pv_forecast >= 0.2)
-            pvColor = "#FFAAAA";
-        else if(row.pv_forecast >= 0.1)
-            pvColor = "#FFFF00";
-            
-        let socColor = "#3AEE85";
-        if(row.soc_percent < 20.0)
-            socColor = "#F18261";
-        else if (row.soc_percent < 50.0)
-            socColor = "#FFFF00";
-            
-        let loadColor = color;
-        if(row.load_forecast >= 0.5)
-            loadColor = "#F18261";
-        else if (row.load_forecast >= 0.25)
-            loadColor = "#FFFF00";
-        else if (row.load_forecast > 0.0)
-            loadColor = "#AAFFAA";
-            
-        let stateColor = color;
-        if(row.state === "FrzChrg")
-            stateColor = "#EEEEEE";
-        if(row.state === "HoldChrg")
-            stateColor = "#34DBEB";
-        if(row.state === "Chrg")
-            stateColor = "#3AEE85"; 
-        if(row.state === "FrzExp")
-            stateColor = "#AAAAAA"; 
-        if(row.state === "Exp")
-            stateColor = "#FFFF00";
-            
+        // Use Predbat-supplied state colors (v8.47+ with state_text / state_color)
+        // or fall back to the old "state" field
+        let stateText = row.state_text || row.state || "";
+        let stateColor = row.state_color || color;
+        let state2Text = row.state2_text || null;
+        let state2Color = row.state2_color || null;
         
-        const arrowGroups = {
-          "→": ["Demand", "FrzExp"],
-          "↗": ["Chrg"],
-          "↘": ["Exp"],
-        };
+        if (!row.state_color) {
+            if(stateText === "FrzChrg") stateColor = "#EEEEEE";
+            else if(stateText === "HoldChrg") stateColor = "#34DBEB";
+            else if(stateText === "Chrg") stateColor = "#3AEE85"; 
+            else if(stateText === "FrzExp") stateColor = "#AAAAAA"; 
+            else if(stateText === "Exp") stateColor = "#FFFF00";
+        }
         
-        const stateArrow =
-          Object.entries(arrowGroups).find(([, states]) =>
-            states.includes(row.state)
-          )?.[0] || "";
+        // Use soc_sym from Predbat (v8.47+) or compute it
+        let socSym = row.soc_sym || "";
+        if (!socSym) {
+            const arrowGroups = {
+              "→": ["Demand", "FrzExp"],
+              "↗": ["Chrg"],
+              "↘": ["Exp"],
+            };
+            socSym = Object.entries(arrowGroups).find(([, states]) =>
+              states.includes(stateText)
+            )?.[0] || "";
+        }
         
         const costArrow =
           row.cost_change > 0 ? "↗" :
           row.cost_change < 0 ? "↘" :
           "→";
-          
-        const socArrow =
+        
+        const socArrow = socSym || (
           row.soc_change > 0 ? "↗" :
           row.soc_change < 0 ? "↘" :
-          "→";
+          "→"
+        );
         
         let trueCost = row.cost_change + " p " + costArrow;
         if(row.cost_change === 0)
-            trueCost = "";
+            trueCost = "→";
         
-        if(row.pv_forecast === 0)
-            row.pv_forecast = "";
+        let pvValue = row.pv_forecast;
+        if(pvValue === 0)
+            pvValue = "";
             
-            
-        //{"value": "Both", "color": "green"};
+        // Handle split state (both charging and exporting in the same slot)
+        let displayState = stateText + socArrow;
+        if (row.split && state2Text) {
+            displayState = "Both";  // Will be transformed by getCellTransformationRefactor
+        }
         
         rowDictionary["time-column"] = {"value": this.convertTimeStampToFriendly(row.time), "color": color};
-        rowDictionary["import-column"] = {"value": String(row.import_rate.toFixed(2)), "color": color};
-        rowDictionary["export-column"] = {"value": String(row.export_rate.toFixed(2)), "color": color};
-        rowDictionary["state-column"] = {"value": String(row.state) + socArrow, "color": stateColor};
-        rowDictionary["limit-column"] = {"value": String(row.state_target), "color": color};
-        rowDictionary["pv-column"] = {"value": String(row.pv_forecast) + "☀", "color": pvColor};
+        rowDictionary["import-column"] = {"value": String((row.import_rate || 0).toFixed(2)), "color": row.rate_color_import || color};
+        rowDictionary["export-column"] = {"value": String((row.export_rate || 0).toFixed(2)), "color": row.rate_color_export || color};
+        rowDictionary["state-column"] = {"value": displayState, "color": stateColor};
+        rowDictionary["limit-column"] = {"value": String(row.show_limit !== undefined ? row.show_limit : (row.state_target || "")), "color": color};
+        rowDictionary["pv-column"] = {"value": String(pvValue) + "☀", "color": pvColor};
         rowDictionary["load-column"] = {"value": String(row.load_forecast), "color": loadColor};
         rowDictionary["soc-column"] = {"value": String(row.soc_percent) + socArrow, "color": socColor};
-        rowDictionary["cost-column"] = {"value": String(trueCost), "color": color};
-        rowDictionary["total-column"] = {"value": "£" + String(row.total_cost.toFixed(2)), "color": color};
+        rowDictionary["cost-column"] = {"value": String(trueCost), "color": row.cost_color || color};
+        rowDictionary["total-column"] = {"value": "£" + String((row.total_cost || 0).toFixed(2)), "color": color};
         if(row.car_charging !== undefined && row.car_charging !== null)
-            rowDictionary["car-column"] = {"value": String(row.car_charging), "color": color};
+            rowDictionary["car-column"] = {"value": String(row.car_charging), "color": row.car_color || color};
         if(row.clipped !== undefined && row.clipped !== null)
-            rowDictionary["clip-column"] = {"value": String(row.clipped), "color": color};
+            rowDictionary["clip-column"] = {"value": String(row.clipped), "color": row.clipped_color || color};
         if(row.iboost !== undefined && row.iboost !== null)
-            rowDictionary["iboost-column"] = {"value": String(row.iboost), "color": color};
+            rowDictionary["iboost-column"] = {"value": String(row.iboost), "color": row.iboost_color || color};
+        if(row.extra_load !== undefined && row.extra_load !== null)
+            rowDictionary["xload-column"] = {"value": String(row.extra_load), "color": row.extra_color || color};
+        if(row.carbon_intensity !== undefined && row.carbon_intensity !== null)
+            rowDictionary["co2kwh-column"] = {"value": String(row.carbon_intensity), "color": row.carbon_intensity_color || color};
+        if(row.total_carbon !== undefined && row.total_carbon !== null)
+            rowDictionary["co2kg-column"] = {"value": String(row.total_carbon), "color": row.carbon_color || color};
 
         const num = (x) => Number.isFinite(parseFloat(x)) ? parseFloat(x) : 0;
         const netPower = (
@@ -2956,7 +2987,7 @@ convertTimeStampToFriendly(timestamp){
         
         // weather forecast
         if(this.forecast){
-            let weatherColor = "#FFFFFF"; // var(--primary-text-color)
+            let weatherColor = "#FFFFFF";
             const match = this.findForecastForLabel(this.convertTimeStampToFriendly(row.time), this.forecast);
             if(match !== undefined && match !== null){
                 let matchStore = match;
@@ -3012,8 +3043,11 @@ convertTimeStampToFriendly(timestamp){
     const dummyElement = document.createElement('div');
     dummyElement.innerHTML = html;
     
-    // Find all <tr> elements in the table body
-    const trElements = dummyElement.querySelectorAll('tbody tr');
+    // Find all <tr> elements in the table (include thead/tbody/tfoot)
+    let trElements = dummyElement.querySelectorAll('table tr');
+    if (!trElements || trElements.length === 0) {
+        trElements = dummyElement.querySelectorAll('tbody tr');
+    }
         
     // Loop through each <tr> element
     
